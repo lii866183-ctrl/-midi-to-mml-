@@ -113,58 +113,13 @@
     let d=0; for(let i=0;i<idx;i++){ const e=events[i]; if(!MmlEvent.is_part_of_chord(e)){ const dur=MmlEvent.get_duration(e); if(dur!=null)d+=dur; } }
     return d;
   }
-// utils.rs 대응 함수 교체본
-function get_display_mml(duration_in_smallest_unit, note_class, smallest_unit){
-  let dur = duration_in_smallest_unit;
-  if(!dur) return "";
-
-  // 허용되는 최소 길이: 16분음표(= su/16 → smallest_unit=64 기준 4유닛)
-  const MIN_ALLOWED_UNITS = smallest_unit / 16; // 64기준 4
-  // 사용 가능한 ‘기본 조각’들: 1, 2, 4, 8, 16 분음표 (whole, half, quarter, eighth, sixteenth)
-  // -> smallest_unit=64 기준 유닛: 64, 32, 16, 8, 4
-  const allowedPieces = [1, 2, 4, 8, 16].map(n => ({
-    dur: smallest_unit / n,  // 이 조각이 차지하는 유닛 수
-    val: n                   // MML 표기 숫자
-  }));
-
-  const out = [];
-
-  while (dur >= MIN_ALLOWED_UNITS) {
-    // 1) 가장 큰 허용 조각부터 선택
-    let picked = null;
-    for (const p of allowedPieces) {
-      if (dur >= p.dur) { picked = p; break; }
-    }
-    if (!picked) break; // 남은 길이가 허용 최소 미만이면 버림(무시)
-
-    // 현재 조각 기보
-    out.push(`${note_class}${picked.val}`);
-    dur -= picked.dur;
-
-    // 2) ‘점’(현재 조각의 절반)을 고려하되,
-    //    절반이 32분 이하(= su/32 이하)이면 "무시"
-    if (dur > 0) {
-      const halfUnits = picked.dur / 2;       // 현재 조각의 절반(유닛)
-      const halfIsAllowed = halfUnits >= MIN_ALLOWED_UNITS; // 16분 이상이면 허용
-
-      // 사용자가 명시한 특수 규칙:
-      // whole(1)의 절반=2분, 2분의 절반=4분, 4분의 절반=8분, 8분의 절반=32분(무시)
-      // -> 즉, 8분 음표에서는 점을 찍지 않음.
-      if (dur >= halfUnits && halfIsAllowed) {
-        out.push(".");        // 점 표기 → 150%
-        dur -= halfUnits;     // 절반만큼 차감
-      }
-    }
-
-    // 남은 길이가 허용 최소 미만이면 더는 조각을 추가하지 않고 무시
-    if (dur < MIN_ALLOWED_UNITS) break;
-
-    // 남은 걸 이어붙일 땐 & 사용 (필요 시)
-    if (dur > 0) out.push("&");
+  function get_display_mml(dur, pc, su){
+    if(!dur) return ""; const notes=[]; let rem=su; while(rem>1){ notes.push({dur:rem, val:su/rem}); rem=Math.trunc(rem/2); } notes.push({dur:rem, val:su/rem});
+    const out=[]; while(dur>0){ let cur=0; for(const n of notes){ if(dur>=n.dur){ dur-=n.dur; cur=n.val; break; } }
+      out.push(`${pc}${cur}`); const half=su/(cur*2); if(dur>0 && dur>=half){ out.push("."); dur-=half; } if(dur>0) out.push("&"); }
+    return out.join("");
   }
 
-  return out.join("");
-}
   // ===== SMF 파서 (간단/필수 이벤트만) =====
   function readU32(b,i){ return (b[i]<<24)|(b[i+1]<<16)|(b[i+2]<<8)|b[i+3]; }
   function readU16(b,i){ return (b[i]<<8)|b[i+1]; }
