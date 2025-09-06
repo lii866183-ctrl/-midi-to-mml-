@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <title>Armis MML 변환기 · 간단버전</title>
+  <title>Armis MML 변환기 · 템포정확버전</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { --bg:#0b0d10; --panel:#131720; --text:#dde3ea; --muted:#9aa6b2; --line:#1f2430; --chip:#1a2130; --accent:#63b3ed; }
@@ -27,7 +27,7 @@
 <body>
   <header>
     <h1>Armis MML 변환기</h1>
-    <p class="subtitle">MIDI 파일을 올리면 자동으로 트랙별 MML을 만들어 드립니다.</p>
+    <p class="subtitle">MIDI 파일을 올리면 자동으로 트랙별 MML을 생성합니다. (템포 변화·타이밍 정확)</p>
   </header>
 
   <main>
@@ -47,35 +47,110 @@
   </main>
 
   <script>
-  // ===== 최소 동작을 위한 기본값 (옵션 제거) =====
-  const DEFAULT_SMALLEST_UNIT = 64;  // 1/64
-  const DEFAULT_MIN_GAP_FOR_CHORD = 0; // 같은 시작은 화음
-  const DEFAULT_VEL_MIN = 0, DEFAULT_VEL_MAX = 15;
-  const AUTO_BOOT_VELOCITY = true;    // 필수 적용
-  const AUTO_EQUALIZE = false;         // 간단버전: 미사용
+  // ======== 설정 ========
+  const SMALLEST_UNIT = 32;          // 1/64
+  const MIN_GAP_FOR_CHORD = 0;       // 완전 동시만 화음
+  const VEL_MIN = 0, VEL_MAX = 15;   // v0~v15
+  const AUTO_BOOT_VELOCITY = true;   // 최대 v를 15에 맞춤
+  const INITIAL_TEMPO = 120;
 
-  // ===== GM Instrument Map =====
+  // ======== 악기 맵 ========
   const INSTRUMENT_MAP = ["acoustic grand piano","bright acoustic piano","electric grand piano","honky-tonk piano","electric piano 1","electric piano 2","harpsichord","clavi","celesta","glockenspiel","music box","vibraphone","marimba","xylophone","tubular bells","dulcimer","drawbar organ","percussive organ","rock organ","church organ","reed organ","accordion","harmonica","tango accordion","acoustic guitar (nylon)","acoustic guitar (steel)","electric guitar (jazz)","electric guitar (clean)","electric guitar (muted)","overdriven guitar","distortion guitar","guitar harmonics","acoustic bass","electric bass (finger)","electric bass (pick)","fretless bass","slap bass 1","slap bass 2","synth bass 1","synth bass 2","violin","viola","cello","contrabass","tremolo strings","pizzicato strings","orchestral harp","timpani","string ensemble 1","string ensemble 2","synthstrings 1","synthstrings 2","choir aahs","voice oohs","synth voice","orchestra hit","trumpet","trombone","tuba","muted trumpet","french horn","brass section","synthbrass 1","synthbrass 2","soprano sax","alto sax","tenor sax","baritone sax","oboe","english horn","bassoon","clarinet","piccolo","flute","recorder","pan flute","blown bottle","shakuhachi","whistle","ocarina","lead 1 (square)","lead 2 (sawtooth)","lead 3 (calliope)","lead 4 (chiff)","lead 5 (charang)","lead 6 (voice)","lead 7 (fifths)","lead 8 (bass + lead)","pad 1 (new age)","pad 2 (warm)","pad 3 (polysynth)","pad 4 (choir)","pad 5 (bowed)","pad 6 (metallic)","pad 7 (halo)","pad 8 (sweep)","fx 1 (rain)","fx 2 (soundtrack)","fx 3 (crystal)","fx 4 (atmosphere)","fx 5 (brightness)","fx 6 (goblins)","fx 7 (echoes)","fx 8 (sci-fi)","sitar","banjo","shamisen","koto","kalimba","bag pipe","fiddle","shanai","tinkle bell","agogo","steel drums","woodblock","taiko drum","melodic tom","synth drum","reverse cymbal","guitar fret noise","breath noise","seashore","bird tweet","telephone ring","helicopter","applause","gunshot"];
 
-  // ===== 모델/유틸 =====
-  class Instrument {
-    constructor(id, ch){ this.instrument_id=id; this.midi_channel=ch; this.name=(ch===9)?"Drum Set":(INSTRUMENT_MAP[id]||INSTRUMENT_MAP[0]); }
+  // ======== 타입/유틸 ========
+  class Instrument{
+    constructor(id,ch){ this.instrument_id=id; this.midi_channel=ch; this.name=(ch===9)?"Drum Set":(INSTRUMENT_MAP[id]||INSTRUMENT_MAP[0]); }
     static default(){ return new Instrument(0,0); }
   }
   const Pitch = { C:"c",Db:"c+",D:"d",Eb:"d+",E:"e",F:"f",Gb:"f+",G:"g",Ab:"g+",A:"a",Bb:"a+",B:"b",Rest:"r" };
-  class MidiState { constructor(pos,dur,ch){ this.position_in_tick=pos; this.duration_in_tick=dur; this.channel=ch; } }
-  class MidiNoteState { constructor(key,vel,state){ this.key=key; this.velocity=vel; this.midi_state=state; } }
-  class MmlNote {
-    constructor(ms,pc,oct,vel,pos,dur,isChord){ this.midi_state=ms; this.pitch_class=pc; this.octave=oct; this.velocity=vel; this.position_in_smallest_unit=pos; this.duration_in_smallest_unit=dur; this.is_part_of_chord=isChord; this.mml_string=""; this.mml_note_length=0; }
-    static from_midi_state(ms,opt,ppq,isChord){
+  class MidiState{ constructor(pos,dur,ch){ this.position_in_tick=pos; this.duration_in_tick=dur; this.channel=ch; } }
+  class MidiNoteState{ constructor(key,vel,state){ this.key=key; this.velocity=vel; this.midi_state=state; } }
+
+  function midi_velocity_to_mml_velocity(v,min,max){ if(min>max){[min,max]=[max,min]} return Math.trunc((v*(max-min))/127)+min; }
+  function midi_key_to_pitch_class(k){ return [Pitch.C,Pitch.Db,Pitch.D,Pitch.Eb,Pitch.E,Pitch.F,Pitch.Gb,Pitch.G,Pitch.Ab,Pitch.A,Pitch.Bb,Pitch.B][k%12]; }
+  function midi_key_to_octave(k){ return k<12?0:Math.trunc(k/12)-1; }
+  function get_smallest_unit_in_tick(ppq,su){ return ppq/(su/4); }
+  function tick_to_smallest_unit(tick, ppq, su){ return Math.round(tick / get_smallest_unit_in_tick(ppq, su)); }
+  function count_mml_notes(s){ return s.split("&").length; }
+
+  // ======== Tempo Event ========
+  class TempoEvent{
+    constructor(tempo, tickOffset, isFirst=false){
+      if(tempo<=0 || tempo>1000) throw new Error("tempo "+tempo);
+      this.tempo=tempo; this.tickOffset=tickOffset|0; this.isFirst=isFirst;
+    }
+    toMML(){ return "t"+this.tempo; }
+    appendToListElement(list){
+      let index=0, target=this.tickOffset;
+      for(; index<list.length; index++){
+        const t=list[index];
+        if(t.tickOffset===target){ list.splice(index,1); break; }
+        else if(t.tickOffset>target){ break; }
+      }
+      if(index===0 || list[index-1].tempo!==this.tempo || !this.isFirst){
+        list.splice(index,0,this);
+      }
+    }
+    static mergeTempoList(list1, list2){
+      if(list1!==list2) for(const t of list1) t.appendToListElement(list2);
+      return list2;
+    }
+    static searchOnTick(list, tickOffset){
+      let tempo=INITIAL_TEMPO;
+      for(const t of list){ if(tickOffset < t.tickOffset) break; tempo=t.tempo; }
+      return tempo;
+    }
+    static searchEqualsTick(list, tickOffset){
+      for(const t of list){ if(t.tickOffset===tickOffset) return true; if(t.tickOffset>tickOffset) break; }
+      return false;
+    }
+  }
+  const MMLTickTable = { TPQN: 480 };
+  function getTimeOnTickOffset(tempoList, tickOffset){
+    let totalTime = 0.0; let tempo = INITIAL_TEMPO; let currentTick = 0;
+    for(const te of tempoList){
+      const tTick = te.tickOffset;
+      if(tickOffset < tTick) break;
+      const currentTempo = te.tempo;
+      if(tempo !== currentTempo){
+        totalTime += (tTick - currentTick) * 60000.0 / tempo;
+        currentTick = tTick;
+      }
+      tempo = currentTempo;
+    }
+    totalTime += (tickOffset - currentTick) * 60000.0 / tempo;
+    return totalTime / MMLTickTable.TPQN;
+  }
+  function getTickOffsetOnTime(tempoList, timeMs){
+    let tempo = INITIAL_TEMPO, pointTime = 0.0, tick = 0.0;
+    for(const te of tempoList){
+      const teTime = getTimeOnTickOffset(tempoList, te.tickOffset);
+      if(timeMs <= teTime){ break; }
+      pointTime = teTime; tempo = te.tempo; tick = te.tickOffset;
+    }
+    tick += (timeMs - pointTime) * MMLTickTable.TPQN * tempo / 60 / 1000;
+    return tick;
+  }
+
+  // ======== MML Event / Note ========
+  class MmlNote{
+    constructor(ms,pc,oct,vel,pos,dur,isChord){
+      this.midi_state=ms; this.pitch_class=pc; this.octave=oct; this.velocity=vel;
+      this.position_in_smallest_unit=pos; this.duration_in_smallest_unit=dur;
+      this.is_part_of_chord=isChord; this.mml_string=""; this.mml_note_length=0;
+    }
+    static from_midi_state(ms, ppq){
       const pc = midi_key_to_pitch_class(ms.key);
       const oc = midi_key_to_octave(ms.key);
-      const v = midi_velocity_to_mml_velocity(ms.velocity, DEFAULT_VEL_MIN, DEFAULT_VEL_MAX);
-      const pos = tick_to_smallest_unit(ms.midi_state.position_in_tick, ppq, DEFAULT_SMALLEST_UNIT);
-      const dur = tick_to_smallest_unit(ms.midi_state.duration_in_tick, ppq, DEFAULT_SMALLEST_UNIT);
-      return new MmlNote(ms, pc, oc, v, pos, dur, isChord);
+      const v = midi_velocity_to_mml_velocity(ms.velocity, VEL_MIN, VEL_MAX);
+      const pos = tick_to_smallest_unit(ms.midi_state.position_in_tick, ppq, SMALLEST_UNIT);
+      const dur = tick_to_smallest_unit(ms.midi_state.duration_in_tick, ppq, SMALLEST_UNIT);
+      return new MmlNote(ms,pc,oc,v,pos,dur,false);
     }
-    update_mml_string(){ this.mml_string=get_display_mml(this.duration_in_smallest_unit,this.pitch_class,DEFAULT_SMALLEST_UNIT); this.mml_note_length=count_mml_notes(this.mml_string); }
+    update_mml_string(){
+      this.mml_string = get_display_mml(this.duration_in_smallest_unit, this.pitch_class, SMALLEST_UNIT);
+      this.mml_note_length = count_mml_notes(this.mml_string);
+    }
   }
   const MmlEvent = {
     Note: n=>({type:"Note",note:n}),
@@ -84,43 +159,56 @@
     Octave: o=>({type:"Octave",value:o}),
     Velocity: v=>({type:"Velocity",value:v}),
     ConnectChord: ()=>({type:"ConnectChord"}),
-    to_mml: e=>{
+    to_mml: (e)=>{
       switch(e.type){
         case "ConnectChord": return ":";
         case "Tempo": return `t${e.tempo}`;
         case "Octave": return `o${e.value}`;
         case "Velocity": return `v${e.value}`;
-        case "Rest": return get_display_mml(e.value, Pitch.Rest, DEFAULT_SMALLEST_UNIT);
+        case "Rest": return get_display_mml(e.value, Pitch.Rest, SMALLEST_UNIT);
         case "Note": return e.note.mml_string;
         default: return "";
       }
     },
-    get_position: e=> e.type==="Note"?e.note.position_in_smallest_unit : e.type==="Tempo"? e.pos : null,
+    get_position: e=> e.type==="Note"? e.note.position_in_smallest_unit : e.type==="Tempo"? e.pos : null,
     set_position: (e,pos)=>{ if(e.type==="Note") e.note.position_in_smallest_unit=pos; else if(e.type==="Tempo") e.pos=pos; },
-    get_duration: e=> e.type==="Note"?e.note.duration_in_smallest_unit : e.type==="Rest"?e.value : null,
+    get_duration: e=> e.type==="Note"? e.note.duration_in_smallest_unit : e.type==="Rest"? e.value : null,
     set_duration: (e,d)=>{ if(e.type==="Note") e.note.duration_in_smallest_unit=d; else if(e.type==="Rest") e.value=d; },
     is_part_of_chord: e=> e.type==="Note" ? e.note.is_part_of_chord : false,
   };
 
-  // 유틸
-  function midi_velocity_to_mml_velocity(v, min, max){ if(min>max)[min,max]=[max,min]; return Math.trunc((v*(max-min))/127)+min; }
-  function midi_key_to_pitch_class(k){ return [Pitch.C,Pitch.Db,Pitch.D,Pitch.Eb,Pitch.E,Pitch.F,Pitch.Gb,Pitch.G,Pitch.Ab,Pitch.A,Pitch.Bb,Pitch.B][k%12]; }
-  function midi_key_to_octave(k){ return k<12?0:Math.trunc(k/12)-1; }
-  function get_smallest_unit_in_tick(ppq, su){ return ppq/(su/4); }
-  function tick_to_smallest_unit(tick, ppq, su){ return Math.round(tick / get_smallest_unit_in_tick(ppq, su)); }
-  function count_mml_notes(s){ return s.split("&").length; }
-  function compute_position(events, idx){
-    let d=0; for(let i=0;i<idx;i++){ const e=events[i]; if(!MmlEvent.is_part_of_chord(e)){ const dur=MmlEvent.get_duration(e); if(dur!=null)d+=dur; } }
-    return d;
-  }
-  function get_display_mml(dur, pc, su){
-    if(!dur) return ""; const notes=[]; let rem=su; while(rem>1){ notes.push({dur:rem, val:su/rem}); rem=Math.trunc(rem/2); } notes.push({dur:rem, val:su/rem});
-    const out=[]; while(dur>0){ let cur=0; for(const n of notes){ if(dur>=n.dur){ dur-=n.dur; cur=n.val; break; } }
-      out.push(`${pc}${cur}`); const half=su/(cur*2); if(dur>0 && dur>=half){ out.push("."); dur-=half; } if(dur>0) out.push("&"); }
+  // ======== 표시용 MML 문자열 ========
+  function get_display_mml(duration_in_smallest_unit, note_class, su){
+    if(!duration_in_smallest_unit) return "";
+    const notes=[]; let rem = su;
+    while(rem > 1){ notes.push({dur:rem, val: su/rem}); rem = Math.trunc(rem/2); }
+    notes.push({dur:rem, val: su/rem});
+    const out=[];
+    let dur = duration_in_smallest_unit;
+    while(dur>0){
+      let cur=0;
+      for(const n of notes){ if(dur>=n.dur){ dur -= n.dur; cur = n.val; break; } }
+      out.push(`${note_class}${cur}`);
+
+      // --- 변경된 부분: "점 + 32분"이면 뒤를 버리고 종료 ---
+      const half = su / (cur * 2);
+      if (dur > 0 && dur >= half) {
+        const remainderIfDotted = dur - half;
+        out.push(".");
+        if (0 == 1) {
+          dur = 0;
+        } else {
+          // 일반 케이스: 나머지 계속 분해
+          dur = remainderIfDotted;
+        }
+      }
+
+      if(dur>=1) out.push("&"); // 아르미스 타이
+    }
     return out.join("");
   }
 
-  // ===== SMF 파서 (간단/필수 이벤트만) =====
+  // ======== SMF 파서 ========
   function readU32(b,i){ return (b[i]<<24)|(b[i+1]<<16)|(b[i+2]<<8)|b[i+3]; }
   function readU16(b,i){ return (b[i]<<8)|b[i+1]; }
   function readVar(b, i){ let val=0, pos=i, byte; do{ byte=b[pos++]; val=(val<<7)|(byte&0x7f);} while(byte&0x80); return {value:val,next:pos}; }
@@ -130,171 +218,378 @@
     const hd=chunk(); if(hd.id!=="MThd") throw new Error("MIDI 헤더(MThd) 없음");
     const h=hd.data; const format=readU16(h,0); const ntrks=readU16(h,2); const division=readU16(h,4);
     const isMetrical=(division&0x8000)===0; const ppq=isMetrical?division:480;
+    MMLTickTable.TPQN = ppq;
+
     const tracks=[];
     for(let t=0;t<ntrks;t++){
-      const ch=chunk(); if(ch.id!=="MTrk") continue; const d=ch.data; let ti=0, rs=null, cur=0; const tr=[];
+      const ch=chunk(); if(ch.id!=="MTrk") continue;
+      const d=ch.data; let ti=0; let rs=null; const out=[];
+
       while(ti<d.length){
-        const delta=readVar(d,ti); ti=delta.next; cur+=delta.value;
-        let status=d[ti]; if(status<0x80){ if(rs==null) throw new Error("Running status 오류"); } else { ti++; rs=status; }
-        if(rs===0xFF){ const meta=d[ti++]; const len=readVar(d,ti); ti=len.next; const m=d.slice(ti,ti+len.value); ti+=len.value;
-          if(meta===0x51 && m.length===3){ const micros=(m[0]<<16)|(m[1]<<8)|m[2]; tr.push({delta:delta.value, kind:{type:"meta", tempoMicros:micros}, abs:cur}); }
-        } else if((rs&0xF0)===0x90){ const chn=rs&0x0F; const key=d[ti++]; const vel=d[ti++]; tr.push({delta:delta.value, kind:{type:"midi", msg:"noteOn", ch:chn, key, vel}, abs:cur}); }
-          else if((rs&0xF0)===0x80){ const chn=rs&0x0F; const key=d[ti++]; const vel=d[ti++]; tr.push({delta:delta.value, kind:{type:"midi", msg:"noteOff", ch:chn, key, vel}, abs:cur}); }
-          else if((rs&0xF0)===0xC0){ const chn=rs&0x0F; const program=d[ti++]; tr.push({delta:delta.value, kind:{type:"midi", msg:"program", ch:chn, program}, abs:cur}); }
-          else {
-            const hi=rs&0xF0; let dataLen=0; if(hi===0xA0 || hi===0xB0 || hi===0xE0) dataLen=2; else if(hi===0xD0) dataLen=1;
-            else if(rs===0xF0 || rs===0xF7){ const len=readVar(d,ti); ti=len.next+len.value; continue; }
-            ti+=dataLen;
+        const delta=readVar(d,ti); ti=delta.next;
+        let status=d[ti];
+        if(status<0x80){ if(rs==null) throw new Error("Running status 오류"); }
+        else { ti++; rs=status; }
+
+        if(rs===0xFF){
+          const metaType = d[ti++]; const len=readVar(d,ti); ti=len.next; const m=d.slice(ti,ti+len.value); ti+=len.value;
+          if(metaType===0x51 && m.length===3){
+            const micros=(m[0]<<16)|(m[1]<<8)|m[2];
+            out.push({delta:delta.value, kind:{type:"meta", tempoMicros:micros}});
           }
+          continue;
+        }
+
+        if(rs===0xF0 || rs===0xF7){ const len=readVar(d,ti); ti=len.next+len.value; continue; }
+
+        const hi = rs & 0xF0; const chn = rs & 0x0F;
+        if(hi===0x90){ const key=d[ti++]; const vel=d[ti++]; out.push({delta:delta.value, kind:{type:"midi", msg:"noteOn", ch:chn, key, vel}}); }
+        else if(hi===0x80){ const key=d[ti++]; const vel=d[ti++]; out.push({delta:delta.value, kind:{type:"midi", msg:"noteOff", ch:chn, key, vel}}); }
+        else if(hi===0xC0){ const program=d[ti++]; out.push({delta:delta.value, kind:{type:"midi", msg:"program", ch:chn, program}}); }
+        else {
+          let dataLen=0; if(hi===0xA0 || hi===0xB0 || hi===0xE0) dataLen=2; else if(hi===0xD0) dataLen=1;
+          ti+=dataLen;
+        }
       }
-      tracks.push(tr);
+      tracks.push(out);
     }
-    return {ppq, tracks};
+    return {format, ppq, tracks};
   }
 
-  // ===== Bridge 생성 =====
-  function bridge_meta_from_midi_track(tr){ const out=[]; let cur=0; for(const ev of tr){ cur+=ev.delta>>>0; if(ev.kind?.type==="meta"){ const bpm=Math.trunc(60000000/ev.kind.tempoMicros); out.push({type:"Tempo", midi_state:new MidiState(cur,0,0), tempo:bpm}); } } return out; }
-  function bridge_notes_from_midi_track(tr){
+  // ======== Bridge + Tempo 병합 ========
+  function bridge_meta_from_midi_track(midi_track){
+    const meta=[]; let cur=0;
+    for(const ev of midi_track){
+      cur += ev.delta>>>0;
+      if(ev.kind?.type==="meta" && typeof ev.kind.tempoMicros==="number"){
+        const bpm = Math.trunc(60000000/ev.kind.tempoMicros);
+        meta.push({ kind:"Tempo", tempo:bpm, midi_state:new MidiState(cur,0,0) });
+      }
+    }
+    return meta;
+  }
+
+  function bridge_notes_from_midi_track(midi_track){
     const out=[]; const hold=new Map(); let cur=0;
-    for(const ev of tr){ cur+=ev.delta>>>0; if(ev.kind?.type==="midi"){
+    for(const ev of midi_track){
+      cur += ev.delta>>>0;
+      if(ev.kind?.type!=="midi") continue;
       const ch=ev.kind.ch;
-      if(ev.kind.msg==="program"){ out.push({type:"ProgramChange", instrument:new Instrument(ev.kind.program, ch), midi_state:new MidiState(cur,0,ch)}); }
-      else if(ev.kind.msg==="noteOn"){ const {key,vel}=ev.kind; if(vel>0){ hold.set(key,new MidiNoteState(key,vel,new MidiState(cur,0,ch))); } else { const n=hold.get(key); if(n){ n.midi_state.duration_in_tick=cur-n.midi_state.position_in_tick; out.push({type:"Note", note_state:n}); hold.delete(key);} } }
-      else if(ev.kind.msg==="noteOff"){ const {key}=ev.kind; const n=hold.get(key); if(n){ n.midi_state.duration_in_tick=cur-n.midi_state.position_in_tick; out.push({type:"Note", note_state:n}); hold.delete(key);} }
-    }}
-    for(const n of hold.values()){ n.midi_state.duration_in_tick=cur-n.midi_state.position_in_tick; out.push({type:"Note", note_state:n}); }
+      if(ev.kind.msg==="program"){
+        out.push({kind:"ProgramChange", instrument:new Instrument(ev.kind.program, ch), midi_state:new MidiState(cur,0,ch)});
+      } else if(ev.kind.msg==="noteOn"){
+        const {key,vel} = ev.kind;
+        if(vel>0){
+          hold.set(key, new MidiNoteState(key, vel, new MidiState(cur,0,ch)));
+        }else{
+          const n=hold.get(key);
+          if(n){ n.midi_state.duration_in_tick = cur - n.midi_state.position_in_tick; out.push({kind:"Note", data:n}); hold.delete(key); }
+        }
+      } else if(ev.kind.msg==="noteOff"){
+        const {key} = ev.kind; const n=hold.get(key);
+        if(n){ n.midi_state.duration_in_tick = cur - n.midi_state.position_in_tick; out.push({kind:"Note", data:n}); hold.delete(key); }
+      }
+    }
+    for(const n of hold.values()){
+      n.midi_state.duration_in_tick = cur - n.midi_state.position_in_tick;
+      out.push({kind:"Note", data:n});
+    }
     return out;
   }
-  function bridge_sort(a,b){ const pa = a.type==="Note"?a.note_state.midi_state.position_in_tick:a.midi_state.position_in_tick;
-                             const pb = b.type==="Note"?b.note_state.midi_state.position_in_tick:b.midi_state.position_in_tick;
-                             if(pa!==pb) return pa-pb; return (a.type==="Note")-(b.type==="Note"); }
 
-  // ===== Bridge → MML =====
-  function bridge_to_raw(bridgeEvents, ppq){
-    const evs=[]; let before=null; let firstOnsetIdx=null; let instrument=null;
+  function bridge_sort(a,b){
+    const pa = a.kind==="Note"?a.data.midi_state.position_in_tick : a.midi_state.position_in_tick;
+    const pb = b.kind==="Note"?b.data.midi_state.position_in_tick : b.midi_state.position_in_tick;
+    if(pa!==pb) return pa-pb;
+    if(a.kind==="Note" && b.kind!=="Note") return 1;
+    if(a.kind!=="Note" && b.kind==="Note") return -1;
+    return 0;
+  }
+
+  function normalizeTempoList(rawTempos){
+    rawTempos.sort((a,b)=> a.midi_state.position_in_tick - b.midi_state.position_in_tick);
+    const list=[];
+    if(!rawTempos.length || rawTempos[0].midi_state.position_in_tick>0){
+      new TempoEvent(INITIAL_TEMPO, 0, true).appendToListElement(list);
+    }
+    for(const e of rawTempos){
+      new TempoEvent(e.tempo, e.midi_state.position_in_tick).appendToListElement(list);
+    }
+    return list;
+  }
+
+  // ======== Bridge → Raw MML Events ========
+  function bridge_events_to_raw_mml_events(bridgeEvents, ppq){
+    const events=[]; let beforeNote=null; let firstOnsetIndex=null; let instrument=null;
+
     for(const e of bridgeEvents){
-      if(e.type==="Tempo"){ const pos=tick_to_smallest_unit(e.midi_state.position_in_tick, ppq, DEFAULT_SMALLEST_UNIT); evs.push(MmlEvent.Tempo(e.tempo, pos)); }
-      else if(e.type==="ProgramChange"){ instrument=e.instrument; }
-      else if(e.type==="Note"){
-        let note = MmlNote.from_midi_state(e.note_state, {}, ppq, false);
-        if(before){
-          if(firstOnsetIdx!=null) handle_note_rel(evs, note, firstOnsetIdx);
-          if(note.octave!==before.octave) evs.push(MmlEvent.Octave(note.octave));
-          if(note.velocity!==before.velocity) evs.push(MmlEvent.Velocity(note.velocity));
+      if(e.kind==="Tempo"){
+        const pos = tick_to_smallest_unit(e.midi_state.position_in_tick, ppq, SMALLEST_UNIT);
+        events.push(MmlEvent.Tempo(e.tempo, pos));
+      } else if(e.kind==="ProgramChange"){
+        instrument = e.instrument;
+      } else if(e.kind==="Note"){
+        let note = MmlNote.from_midi_state(e.data, ppq);
+
+        if(beforeNote){
+          if(firstOnsetIndex!=null){
+            handle_bridge_note_events(events, note, firstOnsetIndex);
+          }
+          if(note.octave !== beforeNote.octave){
+            events.push(MmlEvent.Octave(note.octave));
+          }
+          if(note.velocity !== beforeNote.velocity){
+            events.push(MmlEvent.Velocity(note.velocity));
+          }
         } else {
-          if(note.position_in_smallest_unit>0) evs.push(MmlEvent.Rest(note.position_in_smallest_unit));
-          evs.push(MmlEvent.Velocity(note.velocity));
-          evs.push(MmlEvent.Octave(note.octave));
+          if(note.position_in_smallest_unit>0){
+            events.push(MmlEvent.Rest(note.position_in_smallest_unit));
+          }
+          events.push(MmlEvent.Velocity(note.velocity));
+          events.push(MmlEvent.Octave(note.octave));
         }
-        before = structuredClone(note);
-        if(!note.is_part_of_chord) firstOnsetIdx = evs.length;
-        evs.push(MmlEvent.Note(note));
+
+        beforeNote = structuredClone(note);
+        if(!note.is_part_of_chord) firstOnsetIndex = events.length;
+        events.push(MmlEvent.Note(note));
       }
     }
-    return [evs, instrument];
+    return [events, instrument];
   }
-  function handle_note_rel(evs, note, firstIdx){
-    const base = evs[firstIdx]; if(!base||base.type!=="Note") return; const b=base.note;
-    const bend = b.position_in_smallest_unit + b.duration_in_smallest_unit;
-    const gap = note.position_in_smallest_unit - bend;
-    if(gap>0){ evs.push(MmlEvent.Rest(gap)); }
-    else if(gap<0){
+
+  function handle_bridge_note_events(events, note, firstOnsetIndex){
+    const base = events[firstOnsetIndex];
+    if(!base || base.type!=="Note") return;
+    const b = base.note;
+
+    const bEnd = b.position_in_smallest_unit + b.duration_in_smallest_unit;
+    const gap = note.position_in_smallest_unit - bEnd;
+
+    if(gap > 0){
+      events.push(MmlEvent.Rest(gap));
+    }else if(gap < 0){
       const startGap = note.position_in_smallest_unit - b.position_in_smallest_unit;
-      if(startGap <= DEFAULT_MIN_GAP_FOR_CHORD){ note.is_part_of_chord=true; evs.push(MmlEvent.ConnectChord()); }
-      else { const over=(b.position_in_smallest_unit + b.duration_in_smallest_unit) - note.position_in_smallest_unit; if(over>0) b.duration_in_smallest_unit -= over; }
+      if(startGap <= MIN_GAP_FOR_CHORD){
+        note.is_part_of_chord = true;
+        events.push(MmlEvent.ConnectChord());
+      }else{
+        const over = (b.position_in_smallest_unit + b.duration_in_smallest_unit) - note.position_in_smallest_unit;
+        if(over>0){
+          b.duration_in_smallest_unit -= over;
+        }
+      }
     }
   }
-  function normalize(evs){
-    let i=0, prevNoteIdx=null;
-    while(i<evs.length){
-      const cur = structuredClone(evs[i]);
+
+  // ======== Normalize / 위치 보정 / 화음 길이 일치 ========
+  function has_connect_chord(events, idx){
+    for(let i=idx-1;i>=0;i--){
+      const e=events[i];
+      if(e.type==="ConnectChord") return true;
+      if(e.type==="Note") return false;
+    }
+    return false;
+  }
+
+  function normalize_events(events){
+    let i=0; let beforeNoteIdx=null;
+    while(i<events.length){
+      const cur = events[i];
       if(cur.type==="Note"){
         if(cur.note.is_part_of_chord){
-          // ':' 누락시 보정
-          let hasColon=false; for(let j=i-1;j>=0;j--){ const e=evs[j]; if(e.type==="ConnectChord"){hasColon=true;break;} if(e.type==="Note") break; }
-          if(!hasColon && prevNoteIdx!=null){ evs.splice(prevNoteIdx+1,0,MmlEvent.ConnectChord()); i++; }
-        } else if(cur.note.duration_in_smallest_unit===0){ evs.splice(i,1); i--; }
-        else prevNoteIdx=i;
-      } else if(cur.type==="Rest" && cur.value===0){ evs.splice(i,1); i--; }
-      else if(cur.type==="Tempo" && i>0 && evs[i-1]?.type==="Tempo"){ evs.splice(i-1,1); i--; }
-      i++;
-    }
-  }
-  function fix_positions(evs){
-    let i=0; while(i<evs.length){
-      const e=evs[i];
-      if(e.type==="Note" && !e.note.is_part_of_chord || e.type==="Tempo"){
-        const ni = fix_one(evs, i); if(ni!==i) i=ni;
+          if(!has_connect_chord(events, i)){
+            if(beforeNoteIdx!=null){
+              events.splice(beforeNoteIdx+1,0,MmlEvent.ConnectChord());
+              i++;
+            }
+          }
+        }else if(cur.note.duration_in_smallest_unit===0){
+          events.splice(i,1); i--;
+        }else{
+          beforeNoteIdx=i;
+        }
+      }else if(cur.type==="Rest"){
+        if(cur.value===0){ events.splice(i,1); i--; }
+      }else if(cur.type==="Tempo"){
+        if(i>0 && events[i-1]?.type==="Tempo"){ events.splice(i-1,1); i--; }
       }
       i++;
     }
   }
-  function fix_one(evs, idx){
-    const e=evs[idx]; const expect = MmlEvent.get_position(e); if(expect==null) return idx;
-    let cur = compute_position(evs, idx); if(expect===cur) return idx;
-    let i=idx; while(i>0){ i--; const prev=evs[i]; if(MmlEvent.is_part_of_chord(prev)) continue;
-      if(expect>cur){ evs.splice(i+1,0,MmlEvent.Rest(expect-cur)); return idx+1; }
-      else {
-        const toDec = cur-expect; const d = MmlEvent.get_duration(prev); if(d==null) continue;
-        if(d>toDec) MmlEvent.set_duration(prev, d-toDec);
-        else if(prev.type==="Note") prev.note.is_part_of_chord = true;
-        else if(prev.type==="Rest"){ evs.splice(i,1); return idx-1; }
-        cur = compute_position(evs, idx); if(cur===expect) return idx;
-      }
-    }
-    if(expect>cur){ evs.splice(0,0,MmlEvent.Rest(expect-cur)); return idx+1; }
-    return idx;
-  }
-  function update_chord_duration(evs){
-    let before=null; for(const e of evs){ if(e.type==="Note"){ if(e.note.is_part_of_chord){ if(before) e.note.duration_in_smallest_unit = before.duration_in_smallest_unit; } else before=structuredClone(e.note); } }
-  }
-  function update_note_strings(evs){ for(const e of evs) if(e.type==="Note") e.note.update_mml_string(); }
 
-  // ===== Track/Song =====
-  class MmlTrack {
-    constructor(name, meta, notes, ppq){ this.name=name; this.instrument=Instrument.default(); this.bridge_meta_events=meta; this.bridge_note_events=notes; this.ppq=ppq; this.events=[]; this.mml_note_length=0; this.generate(); }
-    generate(){ const all=[...this.bridge_note_events, ...this.bridge_meta_events].sort(bridge_sort);
-      const [evs, inst] = bridge_to_raw(all, this.ppq); normalize(evs); fix_positions(evs); normalize(evs); update_chord_duration(evs); update_note_strings(evs);
-      if(inst) this.instrument=inst; this.events=evs; this.mml_note_length = evs.reduce((s,e)=> s + (e.type==="Note"? e.note.mml_note_length:0), 0);
+  function compute_position_in_smallest_unit(events, current_index){
+    let duration=0;
+    for(let i=0;i<current_index;i++){
+      const e=events[i];
+      if(!MmlEvent.is_part_of_chord(e)){
+        const d=MmlEvent.get_duration(e);
+        if(d!=null) duration+=d;
+      }
+    }
+    return duration;
+  }
+
+  function fix_event_position(events, event_index){
+    const e = events[event_index]; if(!e) return event_index;
+    const expect = MmlEvent.get_position(e); if(expect==null) return event_index;
+    let current = compute_position_in_smallest_unit(events, event_index);
+    if(expect===current) return event_index;
+
+    let i=event_index;
+    while(i>0){
+      i--;
+      const prev = events[i];
+      if(MmlEvent.is_part_of_chord(prev)) continue;
+
+      if(expect > current){
+        events.splice(i+1,0,MmlEvent.Rest(expect-current));
+        return event_index+1;
+      }else{
+        const toDec = current - expect;
+        const d = MmlEvent.get_duration(prev);
+        if(d==null) continue;
+
+        if(d>toDec){
+          MmlEvent.set_duration(prev, d-toDec);
+        }else if(prev.type==="Note"){
+          prev.note.is_part_of_chord = true;
+        }else if(prev.type==="Rest"){
+          events.splice(i,1);
+          return event_index-1;
+        }
+
+        current = compute_position_in_smallest_unit(events, event_index);
+        if(current===expect) return event_index;
+      }
+    }
+
+    if(expect>current){
+      events.splice(0,0,MmlEvent.Rest(expect-current));
+      return event_index+1;
+    }
+    return event_index;
+  }
+
+  function fix_events_position(events){
+    let i=0;
+    while(i<events.length){
+      const e=events[i];
+      if( (e.type==="Note" && !e.note.is_part_of_chord) || e.type==="Tempo"){
+        const ni = fix_event_position(events, i);
+        if(ni!==i) i=ni;
+      }
+      i++;
+    }
+  }
+
+  function update_chord_duration(events){
+    let before=null;
+    for(const e of events){
+      if(e.type==="Note"){
+        if(e.note.is_part_of_chord){
+          if(before) e.note.duration_in_smallest_unit = before.duration_in_smallest_unit;
+        }else{
+          before = structuredClone(e.note);
+        }
+      }
+    }
+  }
+
+  function update_note_strings(events){
+    for(const e of events){ if(e.type==="Note") e.note.update_mml_string(); }
+  }
+
+  // ======== Track/Song ========
+  class MmlTrack{
+    constructor(name, metaEvents, noteEvents, ppq){
+      this.name = name;
+      this.instrument = Instrument.default();
+      this.ppq = ppq;
+      this.tempoList = normalizeTempoList(metaEvents.filter(e=>e.kind==="Tempo"));
+      const normalizedMeta = this.tempoList.map(t=>({ kind:"Tempo", tempo:t.tempo, midi_state:new MidiState(t.tickOffset,0,0) }));
+      const merged = [...noteEvents, ...normalizedMeta].sort(bridge_sort);
+      const [events, inst] = bridge_events_to_raw_mml_events(merged, this.ppq);
+      normalize_events(events);
+      fix_events_position(events);
+      normalize_events(events);
+      update_chord_duration(events);
+      update_note_strings(events);
+      if(inst) this.instrument = inst;
+      this.events = events;
+      this.mml_note_length = events.reduce((s,e)=> s + (e.type==="Note"? e.note.mml_note_length:0), 0);
     }
     to_mml(){ return this.events.map(e=>MmlEvent.to_mml(e)).join(""); }
   }
-  class MmlSong {
-    constructor(ppq, tracks){ this.ppq=ppq; this.tracks=tracks; if(AUTO_BOOT_VELOCITY){ const diff = this.get_vel_diff(); this.tracks.forEach(t=> t.events.forEach(e=>{ if(e.type==="Velocity") e.value += diff; })); } }
-    get_vel_diff(){ const vmax = Math.max(0,...this.tracks.map(t=>t.events.reduce((m,e)=> e.type==="Velocity"?Math.max(m,e.value):m,0))); return DEFAULT_VEL_MAX - vmax; }
+
+  class MmlSong{
+    constructor(ppq, tracks){
+      this.ppq = ppq;
+      this.tracks = tracks;
+      if(AUTO_BOOT_VELOCITY){
+        const diff = this.get_velocity_diff();
+        if(diff>0){
+          for(const t of this.tracks){
+            for(const e of t.events){
+              if(e.type==="Velocity") e.value = Math.min(15, e.value + diff);
+            }
+          }
+        }
+      }
+    }
+    get_velocity_diff(){
+      let vmax=0;
+      for(const t of this.tracks){
+        for(const e of t.events){
+          if(e.type==="Velocity" && e.value>vmax) vmax = e.value;
+        }
+      }
+      return Math.max(0, VEL_MAX - vmax);
+    }
     static from_bytes(bytes){
       const smf = parseSMF(bytes);
       const ppq = smf.ppq || 480;
-      const metas = smf.tracks.flatMap(bridge_meta_from_midi_track);
-      const notes = smf.tracks.map(bridge_notes_from_midi_track);
-      const tracks = notes.map((ns, i)=> new MmlTrack(String(i), metas.slice(), ns, ppq));
+      const allMeta = smf.tracks.flatMap(bridge_meta_from_midi_track);
+      const normalizedGlobalTempo = normalizeTempoList(allMeta.filter(e=>e.kind==="Tempo"));
+      const noteGroups = smf.tracks.map(bridge_notes_from_midi_track);
+      const tracks = noteGroups.map((ng,i)=> new MmlTrack(String(i),
+        normalizedGlobalTempo.map(t=>({ kind:"Tempo", tempo:t.tempo, midi_state:new MidiState(t.tickOffset,0,0) })), ng, ppq));
       return new MmlSong(ppq, tracks);
     }
   }
 
-  // ===== UI 바인딩 (업로드 → 자동 변환) =====
+  // ======== UI 바인딩 ========
   const $ = sel => document.querySelector(sel);
-  const file = $("#file"), tracksEl = $("#tracks"), ppqEl=$("#ppq"), loadingEl=$("#loading"), errEl=$("#err");
+  const fileEl = $("#file"), tracksEl = $("#tracks"), ppqEl=$("#ppq"), loadingEl=$("#loading"), errEl=$("#err");
 
-  file.addEventListener("change", async (e)=>{
+  fileEl.addEventListener("change", async (e)=>{
     errEl.textContent=""; tracksEl.innerHTML=""; ppqEl.textContent=""; loadingEl.style.display="inline";
     try{
       const f = e.target.files?.[0]; if(!f){ loadingEl.style.display="none"; return; }
       const bytes = await f.arrayBuffer();
+
       const song = MmlSong.from_bytes(bytes);
       ppqEl.textContent = `PPQ: ${song.ppq} · 트랙 ${song.tracks.length}개`;
+
       song.tracks.forEach((t,idx)=>{
         const card = document.createElement("div"); card.className="track";
         const row = document.createElement("div"); row.className="row";
+
         const left = document.createElement("div");
         const badge = document.createElement("span"); badge.className="badge"; badge.textContent = `#${idx} · ${t.instrument.name}`;
         const meta = document.createElement("span"); meta.className="meta"; meta.style.marginLeft="8px"; meta.textContent=`ch=${t.instrument.midi_channel}, len=${t.mml_note_length}`;
         left.appendChild(badge); left.appendChild(meta);
-        const copy = document.createElement("button"); copy.className="copy"; copy.textContent="복사"; copy.onclick=()=>navigator.clipboard.writeText(t.to_mml());
+
+        const copy = document.createElement("button"); copy.className="copy"; copy.textContent="복사";
+        copy.onclick = ()=> navigator.clipboard.writeText(t.to_mml());
+
         row.appendChild(left); row.appendChild(copy);
-        const ta = document.createElement("textarea"); ta.value = t.to_mml();
+
+        const ta = document.createElement("textarea");
+        ta.value = t.to_mml();
+
         card.appendChild(row); card.appendChild(ta); tracksEl.appendChild(card);
       });
+
     } catch (ex){
       console.error(ex); errEl.textContent = `에러: ${ex.message||ex}`;
     } finally { loadingEl.style.display="none"; }
